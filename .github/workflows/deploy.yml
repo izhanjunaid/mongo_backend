@@ -1,0 +1,44 @@
+name: Deploy to Droplet
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image
+        run: docker build -t my-backend .
+
+      - name: Save Docker image to file
+        run: docker save my-backend > my-backend.tar
+
+      - name: Copy Docker image to server
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          source: "my-backend.tar"
+          target: "~/"
+
+      - name: SSH to server and deploy
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            docker load < ~/my-backend.tar
+            docker stop my-backend || true
+            docker rm my-backend || true
+            docker run -d --env-file /root/.env --name my-backend -p 5000:5000 my-backend
