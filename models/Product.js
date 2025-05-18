@@ -1,5 +1,8 @@
+const express = require('express');
 const mongoose = require('mongoose');
 const { GridFSBucket, ObjectId } = require('mongodb');
+
+const router = express.Router();
 
 // Initialize GridFS bucket
 let bucket;
@@ -15,9 +18,7 @@ conn.once('open', () => {
 
 // Helper to get the GridFS bucket
 const getBucket = () => {
-  if (!bucket) {
-    throw new Error('GridFS is not initialized.');
-  }
+  if (!bucket) throw new Error('GridFS is not initialized.');
   return bucket;
 };
 
@@ -26,7 +27,6 @@ const shadeSchema = new mongoose.Schema({
   name:        { type: String, required: true, index: true },
   colorCode:   { type: String, required: true },
   referenceImage: {
-    // Support both legacy URL strings and new GridFS ObjectIds
     type: mongoose.Schema.Types.Mixed,
     required: true,
     get: v => v && v.toString(),
@@ -40,7 +40,6 @@ const shadeSchema = new mongoose.Schema({
 const productSchema = new mongoose.Schema({
   name:        { type: String, required: true, index: true },
   img: {
-    // Support legacy URL strings and optional GridFS ObjectIds
     type: mongoose.Schema.Types.Mixed,
     required: true,
     get: v => v && v.toString(),
@@ -48,7 +47,7 @@ const productSchema = new mongoose.Schema({
   },
   price:       { type: Number, required: true, index: true },
   sale:        { type: Boolean, default: false },
-  category:    { type: String, index: true },  // kept optional for legacy
+  category:    { type: String, index: true },
   brand:       { type: String, index: true },
   description: { type: String },
   shades:      [shadeSchema],
@@ -63,36 +62,66 @@ const productSchema = new mongoose.Schema({
 productSchema.index({ category: 1, brand: 1 });
 productSchema.index({ name: 'text', description: 'text' });
 
-// Helper to upload files into GridFS
-const uploadToGridFS = async (file) => {
+// Mongoose Product model
+const Product = mongoose.model('Product', productSchema);
+
+// Helper to delete files from GridFS safely
+const deleteFromGridFS = async (fileId) => {
+  if (!fileId) return; // nothing to delete
   const bucket = getBucket();
   return new Promise((resolve, reject) => {
-    const uploadStream = bucket.openUploadStream(file.originalname, {
-      contentType: file.mimetype
+    let oid;
+    try {
+      oid = new ObjectId(fileId);
+    } catch (err) {
+      console.error('Invalid ObjectId passed to deleteFromGridFS:', fileId, err);
+      return resolve(); // resolve since no valid file to delete
+    }
+    bucket.delete(oid, (err) => {
+      if (err) {
+        if (err.message.includes('FileNotFound')) {
+          console.warn('GridFS file not found for deletion:', fileId);
+          return resolve();
+        } else {
+          console.error('Error deleting file from GridFS:', err);
+          return reject(err);
+        }
+      }
+      resolve();
     });
-    uploadStream.on('error', err => reject(err));
-    uploadStream.on('finish', f => resolve(f._id));
-    uploadStream.end(file.buffer);
   });
 };
 
-// Helper to delete files from GridFS
-const deleteFromGridFS = async (fileId) => {
-  if (!fileId) return;
-  const bucket = getBucket();
-  return new Promise((resolve, reject) => {
-    try {
-      const oid = new ObjectId(fileId);
-      bucket.delete(oid, err => err ? reject(err) : resolve());
-    } catch (err) {
-      reject(err);
+// DELETE product route
+router.delete('/:id', async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    // Delete main image file
+    if (product.img) {
+      await deleteFromGridFS(product.img);
     }
-  });
-};
+
+    // Delete all shade images
+    for (const shade of product.shades) {
+      if (shade.referenceImage) {
+        await deleteFromGridFS(shade.referenceImage);
+      }
+    }
+
+    // Delete product document
+    await product.deleteOne();
+
+    res.json({ message: 'Product deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting product:', error);
+    res.status(500).json({ message: 'Error deleting product' });
+  }
+});
 
 module.exports = {
-  Product: mongoose.model('Product', productSchema),
-  getBucket,
-  uploadToGridFS,
+  Product,
+  router, // export router to use in your Express app
   deleteFromGridFS
 };
